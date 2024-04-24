@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use anyhow::Result;
 use log::LevelFilter;
 use reqwest::{blocking::Client, redirect::Policy, StatusCode};
 use tauri::async_runtime;
@@ -97,22 +96,22 @@ pub fn sync_autostart(app_handle: &AppHandle) {
     }
 }
 
-pub fn add_log_plugin(app_handle: &AppHandle) -> Result<()> {
-    let plugin = tauri_plugin_log::Builder::default()
-        .targets([LogTarget::LogDir, LogTarget::Stdout])
-        .log_name(format!("{}", chrono::Local::now().format("%Y-%m-%d_%H-%M")))
-        .level(LevelFilter::Info)
-        .format(|out, msg, record| {
-            out.finish(format_args!(
-                "[{}][{}]: {}",
-                chrono::Local::now().format("%H:%M:%S"),
-                record.level(),
-                msg
-            ))
-        })
-        .build();
-
-    Ok(app_handle.plugin(plugin)?)
+pub fn add_log_plugin(app_handle: &AppHandle) -> Result<(), tauri::Error> {
+    app_handle.plugin(
+        tauri_plugin_log::Builder::default()
+            .targets([LogTarget::LogDir, LogTarget::Stdout])
+            .log_name(format!("{}", chrono::Local::now().format("%Y-%m-%d_%H-%M")))
+            .level(LevelFilter::Info)
+            .format(|out, msg, record| {
+                out.finish(format_args!(
+                    "[{}][{}]: {}",
+                    chrono::Local::now().format("%H:%M:%S"),
+                    record.level(),
+                    msg
+                ))
+            })
+            .build(),
+    )
 }
 
 pub fn remove_log_plugin(app_handle: &AppHandle) {
@@ -157,6 +156,7 @@ pub fn compare_time(a: &Path, b: &Path) -> io::Result<Ordering> {
 }
 
 pub fn show_window(window: &Window) {
+    _ = window.show();
     _ = window.unminimize();
     _ = window.set_focus();
 }
@@ -169,18 +169,16 @@ pub fn create_window(app_handle: &AppHandle) {
 
         let builder = tauri::Window::builder(app_handle, "main", tauri::WindowUrl::App(PathBuf::from("/")));
 
-        let size = window_state.get_size();
-        let position = window_state.get_position();
-        let window = builder
+        let size = *window_state.size.lock().unwrap();
+        let position = *window_state.position.lock().unwrap();
+        builder
             .title("LeagueRecord")
             .inner_size(size.0, size.1)
             .position(position.0, position.1)
             .min_inner_size(800.0, 450.0)
-            .visible(false);
-
-        if let Err(e) = window.build() {
-            log::error!("error creating window: {e}");
-        }
+            .visible(false)
+            .build()
+            .expect("error creating window");
     }
 }
 
@@ -190,11 +188,15 @@ pub fn save_window_state(app_handle: &AppHandle, window: &Window) {
 
     if let Ok(size) = window.inner_size() {
         let size = ((size.width as f64) / scale_factor, (size.height as f64) / scale_factor);
-        window_state.set_size(size);
+        *window_state.size.lock().expect("win-state mutex error") = size;
+
+        log::info!("saved window size: {}x{}", size.0, size.1);
     }
     if let Ok(position) = window.outer_position() {
         let position = ((position.x as f64) / scale_factor, (position.y as f64) / scale_factor);
-        window_state.set_position(position);
+        *window_state.position.lock().expect("win-state mutex error") = position;
+
+        log::info!("saved window position: {}x {}y", position.0, position.1);
     }
 }
 
@@ -217,62 +219,63 @@ pub fn ensure_settings_exist(settings_file: &Path) -> bool {
 }
 
 pub fn let_user_edit_settings(app_handle: &AppHandle) {
-    let app_handle = app_handle.clone();
-
     // spawn a separate thread to avoid blocking the main thread with Command::status()
-    async_runtime::spawn_blocking(move || {
-        let settings_file = app_handle.state::<SettingsFile>();
-        let settings_file = settings_file.get();
+    async_runtime::spawn_blocking({
+        let app_handle = app_handle.clone();
+        move || {
+            let settings_file = app_handle.state::<SettingsFile>();
+            let settings_file = settings_file.get();
 
-        if ensure_settings_exist(settings_file) {
-            let settings = app_handle.state::<SettingsWrapper>();
-            let old_marker_flags = settings.get_marker_flags();
-            let old_recordings_path = settings.get_recordings_path();
-            let old_log = settings.debug_log();
+            if ensure_settings_exist(settings_file) {
+                let settings = app_handle.state::<SettingsWrapper>();
+                let old_marker_flags = settings.get_marker_flags();
+                let old_recordings_path = settings.get_recordings_path();
+                let old_log = settings.debug_log();
 
-            // hardcode 'notepad' since league_record currently only works on windows anyways
-            Command::new("notepad")
-                .arg(settings_file)
-                .status()
-                .expect("failed to start text editor");
+                // hardcode 'notepad' since league_record currently only works on windows anyways
+                Command::new("notepad")
+                    .arg(settings_file)
+                    .status()
+                    .expect("failed to start text editor");
 
-            // reload settings from settings.json
-            settings.load_from_file(settings_file);
-            log::info!("Settings updated: {:?}", settings.inner());
+                // reload settings from settings.json
+                settings.load_from_file(settings_file);
+                log::info!("Settings updated: {:?}", settings.inner());
 
-            // check and update autostart if necessary
-            sync_autostart(&app_handle);
+                // check and update autostart if necessary
+                sync_autostart(&app_handle);
 
-            // add / remove logs plugin if needed
-            if old_log != settings.debug_log() {
-                if settings.debug_log() {
-                    if add_log_plugin(&app_handle).is_err() {
-                        // retry
+                // add / remove logs plugin if needed
+                if old_log != settings.debug_log() {
+                    if settings.debug_log() {
+                        if add_log_plugin(&app_handle).is_err() {
+                            // retry
+                            remove_log_plugin(&app_handle);
+                            _ = add_log_plugin(&app_handle);
+                        }
+                    } else {
                         remove_log_plugin(&app_handle);
-                        _ = add_log_plugin(&app_handle);
                     }
-                } else {
-                    remove_log_plugin(&app_handle);
                 }
-            }
 
-            // check if UI window needs to be updated
-            let recordings_path = settings.get_recordings_path();
-            if recordings_path != old_recordings_path {
-                filewatcher::replace(&app_handle, &recordings_path);
-                if let Err(e) = app_handle.emit_all("recordings_changed", ()) {
-                    log::error!("failed to emit 'recordings_changed' event: {e}");
+                // check if UI window needs to be updated
+                let recordings_path = settings.get_recordings_path();
+                if recordings_path != old_recordings_path {
+                    filewatcher::replace(&app_handle, &recordings_path);
+                    if let Err(e) = app_handle.emit_all("recordings_changed", ()) {
+                        log::error!("failed to emit 'recordings_changed' event: {e}");
+                    }
                 }
-            }
 
-            let marker_flags = settings.get_marker_flags();
-            if marker_flags != old_marker_flags {
-                if let Err(e) = app_handle.emit_all("markerflags_changed", ()) {
-                    log::error!("failed to emit 'markerflags_changed' event: {e}");
+                let marker_flags = settings.get_marker_flags();
+                if marker_flags != old_marker_flags {
+                    if let Err(e) = app_handle.emit_all("markerflags_changed", ()) {
+                        log::error!("failed to emit 'markerflags_changed' event: {e}");
+                    }
                 }
-            }
 
-            cleanup_recordings(&app_handle);
+                cleanup_recordings(&app_handle);
+            }
         }
     });
 }
@@ -301,30 +304,12 @@ fn cleanup_recordings_by_size(app_handle: &AppHandle) {
         total_size += currently_recording_metadata.len();
     }
 
-    // split recordings into 'favorites' and 'others' by json metadata 'favorite' value
-    // in case reading the metadata fails put the recording into favorites so it doesn't get deleted
-    let (favorites, others): (Vec<_>, Vec<_>) = recordings
-        .into_iter()
-        .partition(|r| get_metadata(r).map(|md| md.favorite).unwrap_or(true));
+    for recording in recordings {
+        if let Ok(metadata) = recording.metadata() {
+            total_size += metadata.len();
+        };
 
-    // get sum of sizes of recordings marked as favorites
-    for recording in favorites {
-        match recording.metadata() {
-            Ok(metadata) => total_size += metadata.len(),
-            Err(e) => log::warn!(
-                "Failed to get size of recording (favorite) {}: {e}",
-                recording.display(),
-            ),
-        }
-    }
-
-    for recording in others {
-        match recording.metadata() {
-            Ok(metadata) => total_size += metadata.len(),
-            Err(e) => log::warn!("Failed to get size of recording {}: {e}", recording.display(),),
-        }
-
-        if total_size > max_size {
+        if total_size > max_size && !get_metadata(&recording).map(|md| md.favorite).unwrap_or_default() {
             if let Err(e) = delete_recording(recording) {
                 log::error!("deleting file due to size limit failed: {e}");
             }
@@ -333,7 +318,7 @@ fn cleanup_recordings_by_size(app_handle: &AppHandle) {
 }
 
 fn cleanup_recordings_by_age(app_handle: &AppHandle) {
-    fn file_too_old(file: &Path, max_age: Duration, now: SystemTime) -> Result<bool> {
+    fn file_too_old(file: &Path, max_age: Duration, now: SystemTime) -> anyhow::Result<bool> {
         let creation_time = file.metadata()?.created()?;
         let time_passed = now.duration_since(creation_time)?;
         Ok(time_passed > max_age)
@@ -344,7 +329,7 @@ fn cleanup_recordings_by_age(app_handle: &AppHandle) {
     let now = SystemTime::now();
     for recording in get_recordings(app_handle) {
         if file_too_old(&recording, max_age, now).unwrap_or(false)
-            && !get_metadata(&recording).map(|md| md.favorite).unwrap_or(true)
+            && !get_metadata(&recording).map(|md| md.favorite).unwrap_or_default()
         {
             if let Err(e) = delete_recording(recording) {
                 log::error!("deleting file due to age limit failed: {e}");
@@ -353,7 +338,7 @@ fn cleanup_recordings_by_age(app_handle: &AppHandle) {
     }
 }
 
-pub fn delete_recording(recording: PathBuf) -> Result<()> {
+pub fn delete_recording(recording: PathBuf) -> anyhow::Result<()> {
     fs::remove_file(&recording)?;
 
     let mut metadata_file = recording;
@@ -363,7 +348,7 @@ pub fn delete_recording(recording: PathBuf) -> Result<()> {
     Ok(())
 }
 
-pub fn get_metadata(video_path: &Path) -> Result<GameMetadata> {
+pub fn get_metadata(video_path: &Path) -> anyhow::Result<GameMetadata> {
     let mut video_path = video_path.to_owned();
     video_path.set_extension("json");
 

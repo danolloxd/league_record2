@@ -4,6 +4,7 @@ import type Player from 'video.js/dist/types/player';
 import { MarkersPlugin, type Settings, type MarkerOptions } from '@fffffffxxxxxxx/videojs-markers';
 import type { GameEvent } from '@fffffffxxxxxxx/league_record_types';
 
+import { appWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
 import * as tauri from './bindings';
 
@@ -16,7 +17,7 @@ import { sep, join } from '@tauri-apps/api/path';
 // jumps to (eventTime - EVENT_DELAY) when a marker is clicked
 const EVENT_DELAY = 3;
 
-const ui = new UI(videojs);
+const ui = new UI(videojs, appWindow);
 
 type RecordingEvents = {
     participantId: number,
@@ -112,10 +113,10 @@ async function main() {
     const firstVideo = videoIds[0];
     if (firstVideo) {
         setVideo(firstVideo.video_id);
-        player.one('canplay', ui.showWindow);
+        player.one('canplay', tauri.showAppWindow);
     } else {
         setVideo(null);
-        player.ready(ui.showWindow);
+        player.ready(tauri.showAppWindow);
     }
 }
 
@@ -153,7 +154,7 @@ async function setVideo(videoId: string | null) {
 async function setMetadata(videoId: string) {
     const data = await tauri.getMetadata(videoId);
     if (data) {
-        ui.setVideoDescriptionStats(data);
+        ui.setVideoDescriptionStats(data, videoId);
         currentEvents = {
             participantId: data.participantId,
             recordingOffset: data.ingameTimeRecStartOffset,

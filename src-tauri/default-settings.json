@@ -12,7 +12,7 @@
   "checkForUpdates": true,
   "debugLog": false,
   "recordingsFolder": "league_recordings",
-  "filenameFormat": "%Y-%m-%d_%H-%M.mp4",
+  "filenameFormat": "%b%d%k%M.mp4",
   "encodingQuality": 30,
   "outputResolution": null,
   "framerate": [
@@ -21,7 +21,7 @@
   ],
   "recordAudio": "APPLICATION",
   "onlyRecordRanked": false,
-  "autostart": false,
+  "autostart": true,
   "maxRecordingAgeDays": null,
   "maxRecordingsSizeGb": null
 }
